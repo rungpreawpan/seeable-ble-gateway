@@ -1,63 +1,75 @@
 import asyncio
 import threading
+
 import requests
-from bleak import BleakClient, BleakScanner
+from bleak import AdvertisementData, BleakClient, BleakScanner, BLEDevice
 from flask import Flask, request
 
 app = Flask(__name__)
-should_navigate = False
+should_send_data = False
 current_uuid = None
 target_ble_names = []
-found_ble_macs = set()
+active_monitors = {}
+RUUVI_MANUFACTURER_ID = 0x0499
+
 
 def send_to_server(data):
     try:
         requests.post("http://localhost:3000/ble-data", json=data)
-        print(data)
+        print("[ส่งข้อมูล]", data)
     except Exception as e:
-        print("ส่งข้อมูลไปยัง Server ไม่สำเร็จ:", e)
+        print("ส่งข้อมูลไม่สำเร็จ:", e)
 
 
-async def connect_and_stream(device, uuid):
+async def monitor_connected_device(device: BLEDevice):
+    mac = device.address
+    print(f"พยายามเชื่อมต่อกับอุปกรณ์: {mac}")
     try:
         async with BleakClient(device) as client:
-            print(f"เชื่อมต่อกับ {device.address} ({device.name})")
-            while should_navigate:
-                data = {
-                    "uuid": uuid,
-                    "mac": device.address,
-                    "name": device.name,
-                    "rssi": device.rssi,
-                }
-                send_to_server(data)
-                await asyncio.sleep(2)
+            if await client.is_connected():
+                print(f"เชื่อมต่อสำเร็จ: {mac}")
+                while True:
+                    if should_send_data and current_uuid:
+                        name = (device.name or "").strip()
+                        if name in target_ble_names:
+                            try:
+                                rssi = await client.get_rssi()
+                            except:
+                                rssi = device.rssi
+                            data = {
+                                "uuid": current_uuid,
+                                "mac": mac,
+                                "name": name,
+                                "rssi": rssi,
+                            }
+                            send_to_server(data)
+                    await asyncio.sleep(2)
     except Exception as e:
-        print(f"ไม่สามารถเชื่อมต่อ {device.address} ({device.name}): {e}")
+        print(f"ไม่สามารถเชื่อมต่อกับ {device.name}: {e}")
+    finally:
+        if mac in active_monitors:
+            del active_monitors[mac]
+            print(f"หยุด monitor อุปกรณ์: {device.name}")
+
+
+def detection_callback(device: BLEDevice, adv_data: AdvertisementData):
+    mac = device.address
+    if mac in active_monitors:
+        return
+
+    if RUUVI_MANUFACTURER_ID in adv_data.manufacturer_data:
+        print(f"พบ RuuviTag: {mac} | RSSI: {device.rssi}")
+        task = asyncio.create_task(monitor_connected_device(device))
+        active_monitors[mac] = task
 
 
 async def ble_loop():
-    global found_ble_macs
-    found_ble_macs = set()
-
-    while should_navigate:
-        devices = await BleakScanner.discover(timeout=5)
-        names_found = []
-
-        for device in devices:
-            if device.name in target_ble_names and device.address not in found_ble_macs:
-                found_ble_macs.add(device.address)
-                asyncio.create_task(connect_and_stream(device, current_uuid))
-
-        if names_found:
-            print(
-                f"กำลังสแกน... เจอแล้ว {len(found_ble_macs)} ตัว: {', '.join(names_found)}"
-            )
-        else:
-            print(f"กำลังสแกน...")
-
-        await asyncio.sleep(3)
-
-    print("หยุดสแกนแล้ว")
+    print("เริ่มสแกนหา RuuviTag BLE...")
+    scanner = BleakScanner()
+    scanner.register_detection_callback(detection_callback)
+    await scanner.start()
+    while True:
+        await asyncio.sleep(5)
 
 
 def ble_thread():
@@ -68,7 +80,7 @@ def ble_thread():
 
 @app.route("/control", methods=["POST"])
 def control():
-    global should_navigate, current_uuid, target_ble_names
+    global should_send_data, current_uuid, target_ble_names
     data = request.get_json()
     flag = data.get("flag")
     uuid = data.get("uuid")
@@ -77,17 +89,15 @@ def control():
     if flag == "start":
         if not uuid or not ble_names:
             return {"error": "ต้องส่ง uuid และ ble_names"}, 400
-
-        print(f"เริ่มนำทาง UUID: {uuid} กับ BLE: {ble_names}")
+        print(f"เริ่มส่งข้อมูล UUID: {uuid}")
         current_uuid = uuid
         target_ble_names = ble_names
-        should_navigate = True
-        threading.Thread(target=ble_thread).start()
+        should_send_data = True
         return {"status": "started"}
 
     elif flag == "stop":
-        print("หยุดนำทาง")
-        should_navigate = False
+        print("หยุดส่งข้อมูล")
+        should_send_data = False
         current_uuid = None
         target_ble_names = []
         return {"status": "stopped"}
@@ -96,4 +106,5 @@ def control():
 
 
 if __name__ == "__main__":
+    threading.Thread(target=ble_thread, daemon=True).start()
     app.run(port=5001)
