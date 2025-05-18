@@ -12,9 +12,13 @@ TARGET_BLE_NAMES = [
     # "Ruuvi 30E9",
 ]
 
-GATEWAY_POS = (0.5, 2.0)
+GATEWAY_POS = (0.5, 2.0)  # (0.5, 2.0) (1.5, 0.5)
 
 RUUVI_POSITIONS = {
+    # "Ruuvi 2559": (0.0, 0.0),
+    # "Ruuvi BAAD": (3.0, 0.0),
+    # "Ruuvi B69D": (0.0, 8.0),
+    # "Ruuvi 862F": (3.0, 8.0),
     "Ruuvi 2559": (0.0, 0.0),
     "Ruuvi BAAD": (2.5, 0.0),
     "Ruuvi B69D": (0.0, 2.5),
@@ -151,8 +155,9 @@ if __name__ == "__main__":
 
 # import asyncio
 # import threading
-# import requests
+
 # import numpy as np
+# import requests
 # from bleak import AdvertisementData, BleakClient, BleakScanner, BLEDevice
 # from flask import Flask, request
 
