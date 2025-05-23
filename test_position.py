@@ -13,6 +13,7 @@ current_uuid = None
 target_ble_names = []
 active_monitors = {}
 rssi_history = {}
+raw_rssi_history = {}
 kalman_filters = {}
 
 SEEABLE_PREFIX = "seeable-"
@@ -23,14 +24,9 @@ TARGET_BLE_NAMES = [
     "Ruuvi 862F",
 ]
 
-# GATEWAY_POS = (1.5, 0.5)
 GATEWAY_POS = (0.5, 2.0)
 
 RUUVI_POSITIONS = {
-    # "Ruuvi 2559": (0.0, 0.0),
-    # "Ruuvi BAAD": (3.0, 0.0),
-    # "Ruuvi B69D": (0.0, 8.0),
-    # "Ruuvi 862F": (3.0, 8.0),
     "Ruuvi 2559": (0.0, 0.0),
     "Ruuvi BAAD": (2.5, 0.0),
     "Ruuvi B69D": (0.0, 2.5),
@@ -41,7 +37,6 @@ seeable_info = None
 target_ble_list = []
 
 
-# ---------- Kalman Filter ----------
 def apply_kalman_filter(id, rssi, q=1.0, r=4.0):
     if id not in kalman_filters:
         kalman_filters[id] = {"x": rssi, "p": 1.0}
@@ -70,21 +65,26 @@ async def monitor_connected_device(device: BLEDevice):
                 while True:
                     if should_send_data and current_uuid:
                         name = (device.name or "").strip()
-                        if name in target_ble_names:
+                        if name in target_ble_names and name in RUUVI_POSITIONS:
                             try:
                                 raw_rssi = await client.get_rssi()
                             except:
                                 raw_rssi = device.rssi
 
-                            rssi = apply_kalman_filter(mac, raw_rssi)
+                            if mac not in raw_rssi_history:
+                                raw_rssi_history[mac] = {
+                                    "name": name,
+                                    "history": deque(maxlen=20),
+                                }
+                            raw_rssi_history[mac]["history"].append(raw_rssi)
 
-                            if name in TARGET_BLE_NAMES:
-                                if mac not in rssi_history:
-                                    rssi_history[mac] = {
-                                        "name": name,
-                                        "history": deque(maxlen=50),
-                                    }
-                                rssi_history[mac]["history"].append(rssi)
+                            rssi = apply_kalman_filter(mac, raw_rssi)
+                            if mac not in rssi_history:
+                                rssi_history[mac] = {
+                                    "name": name,
+                                    "history": deque(maxlen=20),
+                                }
+                            rssi_history[mac]["history"].append(rssi)
 
                             data = {
                                 "uuid": current_uuid,
@@ -108,45 +108,59 @@ def detection_callback(device: BLEDevice, adv_data: AdvertisementData):
     name = (device.name or adv_data.local_name or "").strip()
     mac = device.address
     raw_rssi = device.rssi
+    filtered_rssi = apply_kalman_filter(mac, raw_rssi)
 
-    id = mac  # Default ID
-    rssi = apply_kalman_filter(mac, raw_rssi)
-
-    # เช็ค seeable จาก manufacturerData
+    # ตรวจจับ seeable
     for mfg_id, mfg_data in adv_data.manufacturer_data.items():
         try:
             mfg_string = mfg_data.decode("utf-8")
             if mfg_string.startswith(SEEABLE_PREFIX):
                 uuid = mfg_string.replace(SEEABLE_PREFIX, "")
-                id = uuid
-                rssi = apply_kalman_filter(uuid, raw_rssi)
+
+                # เก็บ RAW
+                if uuid not in raw_rssi_history:
+                    raw_rssi_history[uuid] = {
+                        "name": "seeable",
+                        "history": deque(maxlen=20),
+                    }
+                raw_rssi_history[uuid]["history"].append(raw_rssi)
+
+                # Filtered
+                filtered_rssi = apply_kalman_filter(uuid, raw_rssi)
                 if uuid not in rssi_history:
                     rssi_history[uuid] = {
                         "name": "seeable",
                         "history": deque(maxlen=20),
                     }
-                rssi_history[uuid]["history"].append(rssi)
+                rssi_history[uuid]["history"].append(filtered_rssi)
 
                 seeable_info = {
                     "name": "seeable",
                     "uuid": uuid,
                     "mac": mac,
-                    "rssi": rssi,
+                    "rssi": filtered_rssi,
                 }
-                break
+
+                print(
+                    f"[พบ Seeable] UUID: {uuid} | RAW: {raw_rssi} | FILTERED: {filtered_rssi}"
+                )
+                return
         except Exception:
             continue
 
-    # สำหรับ Ruuvi
-    if name in TARGET_BLE_NAMES:
+    # ถ้าเป็น Ruuvi
+    if name in TARGET_BLE_NAMES and name in RUUVI_POSITIONS:
+        if mac not in raw_rssi_history:
+            raw_rssi_history[mac] = {"name": name, "history": deque(maxlen=20)}
+        raw_rssi_history[mac]["history"].append(raw_rssi)
+
         if mac not in rssi_history:
             rssi_history[mac] = {"name": name, "history": deque(maxlen=20)}
-        rssi_history[mac]["history"].append(rssi)
+        rssi_history[mac]["history"].append(filtered_rssi)
 
-        existing = next((d for d in target_ble_list if d["mac"] == mac), None)
-        if not existing and name in RUUVI_POSITIONS:
-            target_ble_list.append({"name": name, "mac": mac, "rssi": rssi})
-            print(f"[พบอุปกรณ์เป้าหมาย] {name} {mac} RSSI: {rssi}")
+        if not any(d["mac"] == mac for d in target_ble_list):
+            target_ble_list.append({"name": name, "mac": mac, "rssi": filtered_rssi})
+            print(f"[พบอุปกรณ์เป้าหมาย] {name} {mac} RSSI: {filtered_rssi}")
 
         if mac not in active_monitors:
             print(f"[กำลังเชื่อมต่อกับอุปกรณ์ Ruuvi] {name} ({mac})")
@@ -177,23 +191,60 @@ async def seeable_monitor_loop():
                         }
                     )
 
-            position = None
             seeable_id = seeable_info.get("uuid", seeable_info["mac"])
+            position_filtered = None
+            position_raw = None
+
             if (
                 len(ruuvi_data) >= 2
                 and seeable_id in rssi_history
                 and rssi_history[seeable_id]["history"]
             ):
                 try:
-                    seeable_avg = sum(rssi_history[seeable_id]["history"]) / len(
+                    seeable_avg_filtered = sum(
                         rssi_history[seeable_id]["history"]
+                    ) / len(rssi_history[seeable_id]["history"])
+                    pos_filtered = estimate_seeable_position(
+                        GATEWAY_POS, ruuvi_data, seeable_avg_filtered
                     )
-                    pos = estimate_seeable_position(
-                        GATEWAY_POS, ruuvi_data, seeable_avg
-                    )
-                    position = {"x": round(pos[0], 2), "y": round(pos[1], 2)}
+                    position_filtered = {
+                        "x": round(pos_filtered[0], 2),
+                        "y": round(pos_filtered[1], 2),
+                    }
                 except Exception as e:
-                    print("[ตำแหน่งคำนวณไม่สำเร็จ]", e)
+                    print("[ตำแหน่ง Filtered คำนวณไม่สำเร็จ]", e)
+
+            if (
+                len(ruuvi_data) >= 2
+                and seeable_id in raw_rssi_history
+                and raw_rssi_history[seeable_id]["history"]
+            ):
+                try:
+                    seeable_avg_raw = sum(
+                        raw_rssi_history[seeable_id]["history"]
+                    ) / len(raw_rssi_history[seeable_id]["history"])
+                    pos_raw = estimate_seeable_position(
+                        GATEWAY_POS, ruuvi_data, seeable_avg_raw
+                    )
+                    position_raw = {
+                        "x": round(pos_raw[0], 2),
+                        "y": round(pos_raw[1], 2),
+                    }
+                except Exception as e:
+                    print("[ตำแหน่ง RAW คำนวณไม่สำเร็จ]", e)
+
+            # 🖨 ปริ้นผล
+            if position_filtered:
+                print(
+                    f"📍 Filtered Position: x={position_filtered['x']}, y={position_filtered['y']}"
+                )
+            else:
+                print("⚠️ ยังไม่สามารถคำนวณ Filtered Position ได้")
+
+            if position_raw:
+                print(f"📍 RAW Position: x={position_raw['x']}, y={position_raw['y']}")
+            else:
+                print("⚠️ ยังไม่สามารถคำนวณ RAW Position ได้")
 
             data = {
                 "uuid": current_uuid,
@@ -202,10 +253,11 @@ async def seeable_monitor_loop():
                 "rssi": seeable_info["rssi"],
             }
 
-            if position:
-                data["position"] = position
+            if position_filtered:
+                data["position"] = position_filtered
 
             send_to_server(data)
+
         await asyncio.sleep(2)
 
 
@@ -213,27 +265,41 @@ async def print_ble_status_loop():
     while True:
         print("\n--- BLE STATUS ---")
 
+        # แสดงข้อมูล seeable
         if seeable_info:
             print(f"🔵 Seeable: {seeable_info['mac']} | RSSI: {seeable_info['rssi']}")
         else:
             print("🔵 Seeable: ยังไม่พบ")
 
+        # แสดงอุปกรณ์ Ruuvi
         if target_ble_list:
             for dev in target_ble_list:
                 print(f"🟢 {dev['name']}: {dev['mac']} | RSSI: {dev['rssi']}")
         else:
             print("🟢 ยังไม่พบอุปกรณ์ Ruuvi ใด ๆ")
 
-        print("\n📶 ประวัติ RSSI ล่าสุด:")
+        print("\n📶 ประวัติ RSSI (Filtered):")
         for key, info in rssi_history.items():
+            name = info["name"]
             rssi_list = list(info["history"])
             avg_rssi = round(sum(rssi_list) / len(rssi_list), 2) if rssi_list else None
-            print(f"  - {key} ({info['name']}) | avg: {avg_rssi}")
+            print(f"  - {key} ({name})")
+            print(f"     Filtered: {rssi_list}")
+            print(f"     Avg Filtered: {avg_rssi}")
+
+        print("\n📡 ประวัติ RSSI (RAW):")
+        for key, info in raw_rssi_history.items():
+            name = info["name"]
+            raw_list = list(info["history"])
+            avg_raw = round(sum(raw_list) / len(raw_list), 2) if raw_list else None
+            print(f"  - {key} ({name})")
+            print(f"     RAW: {raw_list}")
+            print(f"     Avg RAW: {avg_raw}")
 
         await asyncio.sleep(2)
 
 
-def rssi_to_distance(rssi, tx_power=-59, n=3.0):
+def rssi_to_distance(rssi, tx_power=-69, n=3.0):
     return round(10 ** ((tx_power - rssi) / (10 * n)), 2)
 
 
@@ -250,7 +316,7 @@ def trilaterate(positions, distances):
 
 
 def estimate_seeable_position(
-    gateway_pos, ruuvi_data, seeable_rssi, tx_power=-65, n=3.3
+    gateway_pos, ruuvi_data, seeable_rssi, tx_power=-69, n=3.0
 ):
     anchor_positions = [gateway_pos]
     anchor_distances = [rssi_to_distance(seeable_rssi, tx_power, n)]
