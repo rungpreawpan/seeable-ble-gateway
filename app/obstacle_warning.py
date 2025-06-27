@@ -2,9 +2,12 @@ from flask import Blueprint, request, jsonify
 from ultralytics import YOLO
 import os, uuid, requests
 
+from .custom_function.image_preprocessor import ImagePreprocessor
+
 obstacle_warning = Blueprint("obstacle_warning", __name__)
 
 model = YOLO("yolo11m.pt")
+preprocessor = ImagePreprocessor(output_dir="/tmp")
 EXPRESS_RESULT_URL = "http://localhost:3000/obstacle-detect-results"
 
 PRIORITY_WEIGHTS = {
@@ -36,7 +39,9 @@ def detect():
     filepath = os.path.join("/tmp", filename)
     file.save(filepath)
 
-    results = model(filepath)
+    processed_path, blur_score = preprocessor.preprocess(filepath)
+    results = model(processed_path)
+    
     image_height, image_width = results[0].orig_shape
     boxes = []
 
@@ -73,6 +78,7 @@ def detect():
         "obstacle": boxes,
         "image_width": image_width,
         "image_height": image_height,
+        "blur_score": round(blur_score, 2),
     }
 
     try:
