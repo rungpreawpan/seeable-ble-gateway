@@ -7,7 +7,6 @@ from flask import Blueprint, jsonify, request
 from PIL import Image
 
 scan_text = Blueprint("scan_text", __name__)
-
 EXPRESS_OCR_RESULT_URL = "http://localhost:3000/ocr-detect"
 
 
