@@ -1,1 +1,1 @@
-# seeable-ble-gateway
+# seeable-flask-server
