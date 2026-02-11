@@ -22,7 +22,7 @@ def detect():
     results = model(filepath)
 
     best_marker_id = None
-    best_conf = 0.0
+    best_conf = 0.4
 
     for result in results:
         for box in result.boxes:
