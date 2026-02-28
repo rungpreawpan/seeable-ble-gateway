@@ -1,7 +1,6 @@
 import os
 import uuid
 
-import requests
 from flask import Blueprint, jsonify, request
 from ultralytics import YOLO
 
@@ -11,13 +10,12 @@ object_detection = Blueprint("object_detection", __name__)
 
 model = YOLO("yolo11m.pt")
 preprocessor = ImagePreprocessor(output_dir="/tmp")
-EXPRESS_RESULT_URL = "http://localhost:3000/results"
 
 CONFIDENCE_THRESHOLD = 0.5
 BLUR_THRESHOLD = 100
 
 
-@object_detection.route("/detect", methods=["POST"])
+@object_detection.route("/object-detection", methods=["POST"])
 def detect():
     if "image" not in request.files:
         return jsonify({"error": "No image uploaded"}), 400
@@ -28,7 +26,6 @@ def detect():
     file.save(filepath)
 
     processed_path, blur_score = preprocessor.preprocess(filepath)
-
     if blur_score < BLUR_THRESHOLD:
         return (
             jsonify(
@@ -67,21 +64,14 @@ def detect():
                 }
             )
 
-    payload = {
-        "boxes": boxes,
-        "image_width": image_width,
-        "image_height": image_height,
-    }
-
-    try:
-        requests.post(EXPRESS_RESULT_URL, json={"objects": payload})
-    except Exception as e:
-        print("Error sending to server:", e)
+    os.remove(filepath)
 
     return jsonify(
         {
-            "status": "Processed",
-            "box_count": len(boxes),
-            "blur_score": round(blur_score, 2),
+            "objects": {
+                "boxes": boxes,
+                "image_width": image_width,
+                "image_height": image_height,
+            }
         }
     )
